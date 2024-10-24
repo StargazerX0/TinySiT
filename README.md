@@ -1,3 +1,22 @@
+## Training
+
+```bash
+torchrun --nnodes=1 --nproc_per_node=8 train_fast.py --model SiT-XL/2 --load_weight pretrained_models/SiT-XL-2-256.pt --data-path ../RescaleDiT/data/imagenet_encoded --epochs 100  --global-batch-size 4 --prefix SiTtest
+```
+
+## Sampling 
+```bash
+python sample.py ODE --num-sampling-steps 64 --ckpt pretrained_models/SiT-XL-2-256.pt --model SiT-XL/2
+```
+
+
+## Pruning
+```bash
+torchrun --nnodes=1 --nproc_per_node=1 --master_port 24325 prune_by_learning.py --model SiT-28-19 --load-weight pretrained_models/SiT-XL-2-256.pt --data-path ../RescaleDiT/data/imagenet_encoded --epochs 2 --prefix learn_mask --global-batch-size 4 --delta-w --lora
+```
+
+
+
 ## Exploring Flow and Diffusion-based Generative Models with Scalable Interpolant Transformers (SiT)<br><sub>Official PyTorch Implementation</sub>
 
 ### [Paper](https://arxiv.org/pdf/2401.08740.pdf) | [Project Page](https://scalable-interpolant.github.io/) | [![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](http://colab.research.google.com/github/willisma/SiT/blob/main/run_SiT.ipynb)
