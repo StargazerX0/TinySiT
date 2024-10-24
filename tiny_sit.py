@@ -11,6 +11,7 @@ import torch.nn as nn
 import numpy as np
 import math
 from timm.models.vision_transformer import PatchEmbed, Attention, Mlp
+import itertools
 
 
 def modulate(x, shift, scale):
@@ -155,6 +156,7 @@ class SiT(nn.Module):
         class_dropout_prob=0.1,
         num_classes=1000,
         learn_sigma=True,
+        groups = [[2,4] for _ in range(7)]
     ):
         super().__init__()
         self.learn_sigma = learn_sigma
@@ -173,6 +175,31 @@ class SiT(nn.Module):
         self.blocks = nn.ModuleList([
             SiTBlock(hidden_size, num_heads, mlp_ratio=mlp_ratio) for _ in range(depth)
         ])
+        
+        def generate_binary_tensor(N, M):
+            # Create all possible binary combinations of length M with N ones
+            combinations = list(itertools.combinations(range(M), N))
+            # Create a tensor to store the result
+            result = torch.zeros((len(combinations), M), dtype=torch.float32)
+            # Fill in the ones according to the combinations
+            for i, indices in enumerate(combinations):
+                result[i, torch.tensor(indices)] = 1
+            return result
+
+        options = []
+        gates = []
+        for N, M in groups:
+            opt = generate_binary_tensor(N, M).to(self.pos_embed.device)
+            options.append(opt)
+            g = nn.Parameter(torch.randn(1, opt.shape[0]), requires_grad=True)
+            torch.nn.init.constant_(g, 0.2)
+            gates.append(g)
+        self.options = options
+        self.gumbel_gates = nn.ParameterList(gates).to(self.pos_embed.device)
+        
+        self.tau = 1.0
+        self.scaling = 1.0
+        
         self.final_layer = FinalLayer(hidden_size, patch_size, self.out_channels)
         self.initialize_weights()
 
@@ -229,7 +256,7 @@ class SiT(nn.Module):
 
     def forward(self, x, t, y):
         """
-        Forward pass of SiT.
+        Forward pass of DiT.
         x: (N, C, H, W) tensor of spatial inputs (images or latent representations of images)
         t: (N,) tensor of diffusion timesteps
         y: (N,) tensor of class labels
@@ -238,8 +265,19 @@ class SiT(nn.Module):
         t = self.t_embedder(t)                   # (N, D)
         y = self.y_embedder(y, self.training)    # (N, D)
         c = t + y                                # (N, D)
-        for block in self.blocks:
-            x = block(x, c)                      # (N, T, D)
+
+        layer_id = 0
+        for i in range(len(self.gumbel_gates)):
+            gate = self.gumbel_gates[i]
+            opt = self.options[i]
+            gate = torch.nn.functional.gumbel_softmax(gate*self.scaling, dim=1, tau=self.tau, hard=True)
+
+            mask = gate @ opt.to(gate.device) # 1 x M
+
+            for j in range(mask.shape[1]):
+                x = self.blocks[layer_id](x, c) * mask[0, j] + x * (1 - mask[0, j])
+                layer_id += 1
+            
         x = self.final_layer(x, c)                # (N, T, patch_size ** 2 * out_channels)
         x = self.unpatchify(x)                   # (N, out_channels, H, W)
         if self.learn_sigma:

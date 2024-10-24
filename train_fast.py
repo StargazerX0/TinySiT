@@ -29,7 +29,7 @@ from download import find_model
 from transport import create_transport, Sampler
 from diffusers.models import AutoencoderKL
 from train_utils import parse_transport_args
-import wandb_utils
+import wandb
 
 
 #################################################################################
@@ -145,26 +145,22 @@ def main(args):
     print(f"Starting rank={rank}, seed={seed}, world_size={dist.get_world_size()}.")
     local_batch_size = int(args.global_batch_size // dist.get_world_size())
 
+    if rank == 0:
+        wandb.init(project='TinySiT', config=args, name=args.prefix)
+
     # Setup an experiment folder:
     if rank == 0:
         os.makedirs(args.results_dir, exist_ok=True)  # Make results folder (holds all experiment subfolders)
         experiment_index = len(glob(f"{args.results_dir}/*"))
-        model_string_name = args.model.replace("/", "-")  # e.g., SiT-XL/2 --> SiT-XL-2 (for naming folders)
-        experiment_name = f"{experiment_index:03d}-{model_string_name}-" \
-                        f"{args.path_type}-{args.prediction}-{args.loss_weight}"
-        experiment_dir = f"{args.results_dir}/{experiment_name}"  # Create an experiment folder
+        model_string_name = args.model.replace("/", "-")  # e.g., DiT-XL/2 --> DiT-XL-2 (for naming folders)
+        experiment_dir = f"{args.results_dir}/{args.prefix}-{model_string_name}"  # Create an experiment folder
         checkpoint_dir = f"{experiment_dir}/checkpoints"  # Stores saved model checkpoints
         os.makedirs(checkpoint_dir, exist_ok=True)
         logger = create_logger(experiment_dir)
         logger.info(f"Experiment directory created at {experiment_dir}")
-
-        entity = os.environ["ENTITY"]
-        project = os.environ["PROJECT"]
-        if args.wandb:
-            wandb_utils.initialize(args, entity, experiment_name, project)
     else:
         logger = create_logger(None)
-
+        
     # Create model:
     assert args.image_size % 8 == 0, "Image size must be divisible by 8 (for the VAE encoder)."
     latent_size = args.image_size // 8
@@ -176,13 +172,17 @@ def main(args):
     # Note that parameter initialization is done within the SiT constructor
     ema = deepcopy(model).to(device)  # Create an EMA of the model for use after training
 
-    if args.ckpt is not None:
-        ckpt_path = args.ckpt
-        state_dict = find_model(ckpt_path)
-        model.load_state_dict(state_dict["model"], strict=args.strict)
-        ema.load_state_dict(state_dict["ema"], strict=args.strict)
-        opt.load_state_dict(state_dict["opt"], strict=args.strict)
-        args = state_dict["args"]
+    if args.load_weight is not None:
+        initial_ckpt = torch.load(args.load_weight, map_location='cpu')
+        if 'ema' in initial_ckpt:
+            model.load_state_dict(initial_ckpt['ema'], strict=args.strict)
+            logger.info(f"Loaded initial EMA weights from {args.load_weight}")
+        elif 'model' in initial_ckpt:
+            model.load_state_dict(initial_ckpt['model'], strict=args.strict)
+            logger.info(f"Loaded initial weights from {args.load_weight}")
+        else:
+            model.load_state_dict(initial_ckpt, strict=args.strict)
+            logger.info(f"Loaded plain weights from {args.load_weight}")
 
     requires_grad(ema, False)
     
@@ -197,11 +197,6 @@ def main(args):
     transport_sampler = Sampler(transport)
     vae = AutoencoderKL.from_pretrained(f"stabilityai/sd-vae-ft-{args.vae}").to(device)
     logger.info(f"SiT Parameters: {sum(p.numel() for p in model.parameters()):,}")
-
-    # Setup optimizer (we used default Adam betas=(0.9, 0.999) and a constant learning rate of 1e-4 in our paper):
-    lr = 2e-4
-    opt = torch.optim.AdamW(model.parameters(), lr=lr, weight_decay=0)
-    sched = torch.optim.lr_scheduler.CosineAnnealingLR(opt, T_max=args.epochs * len(loader), eta_min=lr*0.1)
 
     # Setup data:
     transform = transforms.Compose([
@@ -231,6 +226,15 @@ def main(args):
     )
     logger.info(f"Dataset contains {len(dataset):,} images ({args.data_path})")
     
+        
+    # Setup optimizer (we used default Adam betas=(0.9, 0.999) and a constant learning rate of 1e-4 in our paper):
+    lr = 2e-4
+    opt = torch.optim.AdamW(model.parameters(), lr=lr, weight_decay=0)
+    sched = torch.optim.lr_scheduler.CosineAnnealingLR(opt, T_max=args.epochs * len(loader), eta_min=lr*0.5)
+
+    # Prepare models for training:
+    update_ema(ema, model.module, decay=0)  # Ensure EMA is initialized with synced weights
+    
     if args.resume is not None:
         checkpoint = torch.load(args.resume, map_location=f'cuda:{device}')
         model.module.load_state_dict(checkpoint["model"])
@@ -245,9 +249,7 @@ def main(args):
     else:
         start_epoch = 0
         train_steps = 0
-
-    # Prepare models for training:
-    update_ema(ema, model.module, decay=0)  # Ensure EMA is initialized with synced weights
+        
     model.train()  # important! This enables embedding dropout for classifier-free guidance
     ema.eval()  # EMA model should always be in eval mode
 
@@ -324,13 +326,9 @@ def main(args):
                 avg_loss = avg_loss.item() / dist.get_world_size()
                 
                 logger.info(f"(step={train_steps:07d}) Train Loss: {avg_loss:.4f}, Train Steps/Sec: {steps_per_sec:.2f}")
-                if rank == 0 and args.wandb:
+                if rank == 0:
                     try:
-                        wandb_utils.log({
-                            "train_loss": avg_loss,
-                            "misc/steps_per_sec": steps_per_sec,
-                            "misc/lr": opt.param_groups[0]['lr']
-                        }, step=train_steps)
+                        wandb.log({"train_loss": avg_loss, "misc/steps_per_sec": steps_per_sec, "misc/lr": opt.param_groups[0]['lr']}, step=train_steps)
                     except:
                         pass
                     
@@ -395,8 +393,10 @@ if __name__ == "__main__":
     parser.add_argument("--sample-every", type=int, default=10_000)
     parser.add_argument("--cfg-scale", type=float, default=4.0)
     parser.add_argument("--wandb", action="store_true")
+    parser.add_argument("--prefix", type=str, default='')
     parser.add_argument("--strict", action='store_true')
-    parser.add_argument("--ckpt", type=str, default=None,
+    parser.add_argument("--resume", type=str, default=None)
+    parser.add_argument("--load_weight", type=str, default=None,
                         help="Optional path to a custom SiT checkpoint")
 
     parse_transport_args(parser)

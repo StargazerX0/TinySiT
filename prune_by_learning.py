@@ -254,7 +254,7 @@ def main(args):
         args.train_eps,
         args.sample_eps
     )  # default: velocity; 
-    vae = AutoencoderKL.from_pretrained(f"stabilityai/sd-vae-ft-{args.vae}").to(device)
+
 
     if rank==0:
         print(model)
@@ -359,9 +359,8 @@ def main(args):
             y = y.squeeze(dim=1)
             opt.zero_grad()
             
-            # t = torch.randint(0, diffusion.num_timesteps, (x.shape[0],), device=device)
             model_kwargs = dict(y=y)
-            with torch.autocast(device_type='cuda', dtype=torch.float16):
+            with torch.autocast(device_type='cuda', dtype=torch.bfloat16):
                 loss_dict = transport.training_losses(model, x, model_kwargs)
                 loss = loss_dict["loss"].mean()
                 
@@ -484,5 +483,6 @@ if __name__ == "__main__":
     parser.add_argument("--delta-w", action='store_true', default=False, help="enable efficient weight update during structure learning")
     parser.add_argument('--scaling-range', nargs='+', type=float, default=[1e1, 1e1])
     parser.add_argument('--tau-range', nargs='+', type=float, default=[2, 2])
+    parse_transport_args(parser)
     args = parser.parse_args()
     main(args)

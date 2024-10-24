@@ -132,6 +132,8 @@ class Transport:
         t, xt, ut = self.path_sampler.plan(t, x0, x1)
         model_output = model(xt, t, **model_kwargs)
         B, *_, C = xt.shape
+        # print(f"model_output.size(): {model_output.size()}")
+        # print(f"Expected size: {(B, *xt.size()[1:-1], C)}")
         assert model_output.size() == (B, *xt.size()[1:-1], C)
 
         terms = {}
