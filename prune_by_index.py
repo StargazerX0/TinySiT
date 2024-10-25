@@ -2,8 +2,7 @@ import torch
 torch.backends.cuda.matmul.allow_tf32 = True
 torch.backends.cudnn.allow_tf32 = True
 from torchvision.utils import save_image
-from diffusion import create_diffusion
-from diffusers.models import AutoencoderKL
+from transport import create_transport, Sampler
 from download import find_model
 from models import SiT_models, SiTBlock
 import argparse
@@ -21,9 +20,10 @@ from copy import deepcopy
 from glob import glob
 from time import time
 import argparse
-import logging
 import os
-from typing import Any, Dict, List, Optional, Union
+import sys
+from train_utils import parse_ode_args, parse_sde_args, parse_transport_args
+from diffusers.models import AutoencoderKL
 
 def center_crop_arr(pil_image, image_size):
     """
@@ -48,6 +48,8 @@ def center_crop_arr(pil_image, image_size):
 
 if __name__=='__main__':
     parser = argparse.ArgumentParser()
+    
+    parser.add_argument("--mode", type=str, default='ODE', choices=['ODE', 'SDE'])
     parser.add_argument("--model", type=str, choices=list(SiT_models.keys()), default="SiT-XL/2")
     parser.add_argument("--vae", type=str, choices=["ema", "mse"], default="ema")
     parser.add_argument("--data-path", type=str, default='data/imagenet/train')
@@ -63,9 +65,19 @@ if __name__=='__main__':
     parser.add_argument("--batch-size", type=int, default=16)
     parser.add_argument("--save-model", type=str, default=None)
     parser.add_argument("--kept-indices", type=str, required=True, help="Indices to keep, eg: [0,1,2,3]")
+    
+    parse_transport_args(parser)
+        
     args = parser.parse_args()
+    if args.mode == "ODE":
+        parse_ode_args(parser)
+        # Further processing for ODE
+    elif args.mode == "SDE":
+        parse_sde_args(parser)
+        # Further processing for SDE
 
     # parse kept indices
+    args = parser.parse_known_args()[0]
 
     assert args.kept_indices[0] == "[" and args.kept_indices[-1] == "]", "Indices must be in the format [0,1,2,3]"
     kept_indices = [int(i) for i in args.kept_indices[1:-1].split(",")]
@@ -93,7 +105,42 @@ if __name__=='__main__':
     model.eval()  # important!
     model.to(device)
 
-    diffusion = create_diffusion(str(args.num_sampling_steps))
+    transport = create_transport(
+        args.path_type,
+        args.prediction,
+        args.loss_weight,
+        args.train_eps,
+        args.sample_eps
+    )
+    sampler = Sampler(transport)
+    if args.mode == "ODE":
+        if args.likelihood:
+            assert args.cfg_scale == 1, "Likelihood is incompatible with guidance"
+            sample_fn = sampler.sample_ode_likelihood(
+                sampling_method=args.sampling_method,
+                num_steps=args.num_sampling_steps,
+                atol=args.atol,
+                rtol=args.rtol,
+            )
+        else:
+            sample_fn = sampler.sample_ode(
+                sampling_method=args.sampling_method,
+                num_steps=args.num_sampling_steps,
+                atol=args.atol,
+                rtol=args.rtol,
+                reverse=args.reverse
+                )
+            
+    elif args.mode == "SDE":
+        sample_fn = sampler.sample_sde(
+            sampling_method=args.sampling_method,
+            diffusion_form=args.diffusion_form,
+            diffusion_norm=args.diffusion_norm,
+            last_step=args.last_step,
+            last_step_size=args.last_step_size,
+            num_steps=args.num_sampling_steps,
+        )
+        
     vae = AutoencoderKL.from_pretrained(f"stabilityai/sd-vae-ft-{args.vae}").to(device)
     
     # find the starting point with the highest score    
@@ -102,37 +149,35 @@ if __name__=='__main__':
         if i in kept_indices:
             new_blocks.append(model.blocks[i])
     model.blocks = torch.nn.ModuleList(new_blocks)
-    print(f"Number of parameters: {sum(p.numel() for p in model.parameters())}")
-    print(f"Number of layers: {len(model.blocks)}")
-    print(f"Remaining Layers: {kept_indices}")
+    # print(f"Number of parameters: {sum(p.numel() for p in model.parameters())}")
+    # print(f"Number of layers: {len(model.blocks)}")
+    # print(f"Remaining Layers: {kept_indices}")
     
-    # Labels to conSiTion the model with (feel free to change):
-    class_labels = [207, 360, 387, 974, 88, 979, 417, 279]
+    # # Labels to condition the model with (feel free to change):
+    # class_labels = [207, 360, 387, 974, 88, 979, 417, 279]
+    
+    # # Create sampling noise:
+    # n = len(class_labels)
+    # z = torch.randn(n, 4, latent_size, latent_size, device=device)
+    # y = torch.tensor(class_labels, device=device)
 
-    # Create sampling noise:
-    n = len(class_labels)
-    z = torch.randn(n, 4, latent_size, latent_size, device=device)
-    y = torch.tensor(class_labels, device=device)
+    # # Setup classifier-free guidance:
+    # z = torch.cat([z, z], 0)
+    # y_null = torch.tensor([1000] * n, device=device)
+    # y = torch.cat([y, y_null], 0)
+    # model_kwargs = dict(y=y, cfg_scale=args.cfg_scale)
 
-    # Setup classifier-free guidance:
-    z = torch.cat([z, z], 0)
-    y_null = torch.tensor([1000] * n, device=device)
-    y = torch.cat([y, y_null], 0)
-    model_kwargs = dict(y=y, cfg_scale=args.cfg_scale)
+    # # Sample images:
+    # start_time = time()
+    # samples = sample_fn(z, model.forward_with_cfg, **model_kwargs)[-1]
+    # samples, _ = samples.chunk(2, dim=0)  # Remove null class samples
+    # samples = vae.decode(samples / 0.18215).sample
+    # print(f"Sampling took {time() - start_time:.2f} seconds.")
 
-    # Sample images:
-    samples = diffusion.p_sample_loop(
-        model.forward_with_cfg, z.shape, z, clip_denoised=False, model_kwargs=model_kwargs, progress=True, device=device
-    )
-    samples, _ = samples.chunk(2, dim=0)  # Remove null class samples
-    samples = vae.decode(samples / 0.18215).sample
-
-    # Save and display images:
-    save_image(samples, "sample.png", nrow=4, normalize=True, value_range=(-1, 1))
+    # # Save and display images:
+    # save_image(samples, "sample.png", nrow=4, normalize=True, value_range=(-1, 1))
 
     # Check sparsiy
     if args.save_model is not None:
         os.makedirs(os.path.dirname(args.save_model), exist_ok=True)
         torch.save(model.state_dict(), args.save_model)
-
-    

@@ -29,19 +29,12 @@ def main(mode, args):
         assert args.image_size in [256, 512]
         assert args.num_classes == 1000
         assert args.image_size == 256, "512x512 models are not yet available for auto-download." # remove this line when 512x512 models are available
-        learn_sigma = args.image_size == 256
-
-    if args.model == "SiT-XL/2":
-        learn_sigma = True
-    else:
-        learn_sigma = False
 
     # Load model:
     latent_size = args.image_size // 8
     model = SiT_models[args.model](
         input_size=latent_size,
-        num_classes=args.num_classes,
-        learn_sigma=learn_sigma,
+        num_classes=args.num_classes
     ).to(device)
     # Auto-download a pre-trained model or load a custom SiT checkpoint from train.py:
     ckpt_path = args.ckpt or f"SiT-XL-2-{args.image_size}x{args.image_size}.pt"
