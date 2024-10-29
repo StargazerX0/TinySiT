@@ -271,14 +271,14 @@ def main(args):
     dataset = CustomDataset(features_dir, labels_dir, flip=0.5)
     sampler = DistributedSampler(
         dataset,
-        num_replicas=dist.get_world_size(),
+        num_replicas=1,
         rank=rank,
         shuffle=True,
         seed=args.global_seed
     )
     loader = DataLoader(
         dataset,
-        batch_size=int(args.global_batch_size // dist.get_world_size()),
+        batch_size=args.batch_size,
         shuffle=False,
         sampler=sampler,
         num_workers=args.num_workers,
