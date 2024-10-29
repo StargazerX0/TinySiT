@@ -26,6 +26,8 @@ from time import time
 import argparse
 import logging
 import os
+import random
+
 
 from models import SiT_models
 from download import find_model
@@ -124,25 +126,15 @@ def center_crop_arr(pil_image, image_size):
     crop_x = (arr.shape[1] - image_size) // 2
     return Image.fromarray(arr[crop_y: crop_y + image_size, crop_x: crop_x + image_size])
 
+
 class CustomDataset(torch.utils.data.Dataset):
-    def __init__(self, features_dir, labels_dir, random_flip=False):
+    def __init__(self, features_dir, labels_dir, flip=0):
         self.features_dir = features_dir
         self.labels_dir = labels_dir
 
         self.features_files = sorted(os.listdir(features_dir))
         self.labels_files = sorted(os.listdir(labels_dir))
-
-        if not random_flip: # range(0, 1,281,167)
-            n_samples = 1281167 #len(self.features_files)//2
-            new_features_files = []
-            new_labels_files = []
-            for i in range(len(self.features_files)):
-                idx = int(self.features_files[i].split('.')[0])
-                if idx < n_samples:
-                    new_features_files.append(self.features_files[i])
-                    new_labels_files.append(self.labels_files[i])
-            self.features_files = new_features_files
-            self.labels_files = new_labels_files
+        self.flip = flip
 
     def __len__(self):
         assert len(self.features_files) == len(self.labels_files), \
@@ -155,6 +147,12 @@ class CustomDataset(torch.utils.data.Dataset):
 
         features = np.load(os.path.join(self.features_dir, feature_file))
         labels = np.load(os.path.join(self.labels_dir, label_file))
+
+        if self.flip>0:
+            if random.random() < self.flip:
+                features = features[1:]
+            else:
+                features = features[:1]
         return torch.from_numpy(features), torch.from_numpy(labels)
 
 #################################################################################
@@ -212,6 +210,28 @@ def main(args):
         else:
             model.load_state_dict(initial_ckpt, strict=False)
             print(f"Loaded plain weights from {args.load_weight}")
+
+    features_dir = f"{args.data_path}/imagenet256_features"
+    labels_dir = f"{args.data_path}/imagenet256_labels"
+    dataset = CustomDataset(features_dir, labels_dir, flip=0.5)
+    sampler = DistributedSampler(
+        dataset,
+        num_replicas=dist.get_world_size(),
+        rank=rank,
+        shuffle=True,
+        seed=args.global_seed
+    )
+    loader = DataLoader(
+        dataset,
+        batch_size=int(args.global_batch_size // dist.get_world_size()),
+        shuffle=False,
+        sampler=sampler,
+        num_workers=args.num_workers,
+        pin_memory=True,
+        drop_last=True
+    )
+    if rank==0:
+        print(f"Dataset contains {len(dataset):,} images ({args.data_path})")
     
     lr = 1e-4
     gate_params = {}
@@ -268,27 +288,6 @@ def main(args):
         transforms.Normalize(mean=[0.5, 0.5, 0.5], std=[0.5, 0.5, 0.5], inplace=True)
     ])
 
-    features_dir = f"{args.data_path}/imagenet256_features"
-    labels_dir = f"{args.data_path}/imagenet256_labels"
-    dataset = CustomDataset(features_dir, labels_dir)
-    sampler = DistributedSampler(
-        dataset,
-        num_replicas=dist.get_world_size(),
-        rank=rank,
-        shuffle=True,
-        seed=args.global_seed
-    )
-    loader = DataLoader(
-        dataset,
-        batch_size=int(args.global_batch_size // dist.get_world_size()),
-        shuffle=False,
-        sampler=sampler,
-        num_workers=args.num_workers,
-        pin_memory=True,
-        drop_last=True
-    )
-    if rank==0:
-        print(f"Dataset contains {len(dataset):,} images ({args.data_path})")
     
     # Fetch all params from the model that are associated with LoRA.
     #sched = torch.optim.lr_scheduler.CosineAnnealingLR(opt, T_max=args.epochs * len(loader), eta_min=lr*0.5)
@@ -333,7 +332,7 @@ def main(args):
             if isinstance(selected_layers, int):
                 selected_layers = [selected_layers]
             #print(torch.softmax(gate*1e1, dim=1).detach().cpu().tolist(), selected_layers)
-            conf.append( max( torch.softmax(gate*1e1, dim=1).detach().cpu().tolist()[0] ) )
+            conf.append( max( torch.softmax(gate*args.scaling_range[0], dim=1).detach().cpu().tolist()[0] ) )
             decisions.extend(selected_layers)
             layer_offset += option.size(1)
         print(f"Decision: {decisions}")
@@ -482,7 +481,7 @@ if __name__ == "__main__":
     parser.add_argument("--lora", action='store_true', default=False)
     parser.add_argument("--delta-w", action='store_true', default=False, help="enable efficient weight update during structure learning")
     parser.add_argument('--scaling-range', nargs='+', type=float, default=[1e1, 1e1])
-    parser.add_argument('--tau-range', nargs='+', type=float, default=[2, 2])
+    parser.add_argument('--tau-range', nargs='+', type=float, default=[4, 0.05])
     parse_transport_args(parser)
     args = parser.parse_args()
     main(args)

@@ -109,12 +109,13 @@ def center_crop_arr(pil_image, image_size):
     return Image.fromarray(arr[crop_y: crop_y + image_size, crop_x: crop_x + image_size])
 
 class CustomDataset(torch.utils.data.Dataset):
-    def __init__(self, features_dir, labels_dir):
+    def __init__(self, features_dir, labels_dir, flip=0):
         self.features_dir = features_dir
         self.labels_dir = labels_dir
 
         self.features_files = sorted(os.listdir(features_dir))
         self.labels_files = sorted(os.listdir(labels_dir))
+        self.flip = flip
 
     def __len__(self):
         assert len(self.features_files) == len(self.labels_files), \
@@ -127,7 +128,14 @@ class CustomDataset(torch.utils.data.Dataset):
 
         features = np.load(os.path.join(self.features_dir, feature_file))
         labels = np.load(os.path.join(self.labels_dir, label_file))
+
+        if self.flip>0:
+            if random.random() < self.flip:
+                features = features[1:]
+            else:
+                features = features[:1]
         return torch.from_numpy(features), torch.from_numpy(labels)
+
 
 #################################################################################
 #                                  Training Loop                                #
@@ -196,8 +204,8 @@ def main(args):
         module.feature = output
     
     if args.model == 'SiT-S14/2':
-        student_layers = list(range(0, 14))
-        teacher_layers = list(range(1, 28, 2))
+        student_layers = list(range(1, 14, 2))
+        teacher_layers = list(range(3, 28, 4))
     elif args.model == 'SiT-S19/2':
         student_layers = [2, 5, 7, 10, 12, 15, 18]
         teacher_layers = [3, 7, 11, 15, 19, 23, 27]
@@ -260,7 +268,7 @@ def main(args):
     # Setup data:
     features_dir = f"{args.data_path}/imagenet256_features"
     labels_dir = f"{args.data_path}/imagenet256_labels"
-    dataset = CustomDataset(features_dir, labels_dir)
+    dataset = CustomDataset(features_dir, labels_dir, flip=0.5)
     sampler = DistributedSampler(
         dataset,
         num_replicas=dist.get_world_size(),
@@ -315,9 +323,11 @@ def main(args):
 
     logger.info(f"Training for {args.epochs} epochs ({args.epochs * len(loader)} steps)...")
     scaler = torch.cuda.amp.GradScaler()
+    init_beta_feature = 1e-2
     for epoch in range(start_epoch, args.epochs):
         sampler.set_epoch(epoch)
         logger.info(f"Beginning epoch {epoch}...")
+        beta_feat = init_beta_feature * (1 - epoch/(args.epochs-1))
         for x, y in loader:
             x = x.to(device)
             y = y.to(device)
@@ -328,7 +338,7 @@ def main(args):
             model_kwargs = dict(y=y)
 
             with torch.autocast(device_type='cuda', dtype=torch.float16):
-                loss_dict = transport.training_losses_kd_rep(model, teacher, x, model_kwargs)
+                loss_dict = transport.training_losses_kd_rep(model, teacher, x, model_kwargs, beta_feat=beta_feat)
                 loss = loss_dict["loss"].mean()
 
             scaler.scale(loss).backward()
