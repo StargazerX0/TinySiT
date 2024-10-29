@@ -1,6 +1,8 @@
 ## Training
 
 ```bash
+torchrun --nnodes=1 --nproc_per_node=1 kd_rep_fast.py  --model SiT-S14/2 --load-weight outputs/pruned/Test-S14.pt --teacher SiT-XL/2 --load-teacher pretrained_models/SiT-XL-2-256.pt --data-path ../RescaleDiT/data/imagenet_encoded --epochs 100  --global-batch-size 4 --prefix SiTtest
+
 torchrun --nnodes=1 --nproc_per_node=8 train_fast.py --model SiT-XL/2 --load_weight pretrained_models/SiT-XL-2-256.pt --data-path ../RescaleDiT/data/imagenet_encoded --epochs 100  --global-batch-size 4 --prefix SiTtest
 ```
 
@@ -13,6 +15,8 @@ python sample.py ODE --num-sampling-steps 64 --ckpt pretrained_models/SiT-XL-2-2
 ## Pruning
 ```bash
 torchrun --nnodes=1 --nproc_per_node=1 --master_port 24325 prune_by_learning.py --model SiT-28-19 --load-weight pretrained_models/SiT-XL-2-256.pt --data-path ../RescaleDiT/data/imagenet_encoded --epochs 2 --prefix learn_mask --global-batch-size 4 --delta-w --lora
+
+python prune_by_index.py --mode ODE --num-sampling-steps 2 --model SiT-XL/2 --ckpt pretrained_models/SiT-XL-2-256.pt --save-model outputs/pruned/Test-S14.pt --kept-indices "[1, 2, 4, 6, 8, 11, 12, 15, 16, 18, 21, 23, 24, 26]"
 ```
 
 
