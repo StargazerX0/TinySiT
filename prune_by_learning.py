@@ -325,7 +325,7 @@ def main(args):
         layer_offset = 0
         decisions = []
         conf = []
-        for gate, option in zip(model.module.gumbel_gates, model.module.options):
+        for gate, option in zip(ema.gumbel_gates, ema.options):
             selected = gate.max(1)[1].item()
             mask = option[selected]
             selected_layers = (mask.nonzero()+layer_offset).squeeze().tolist()
@@ -398,7 +398,7 @@ def main(args):
                     layer_offset = 0
                     decisions = []
                     conf = []
-                    for gate, option in zip(model.module.gumbel_gates, model.module.options):
+                    for gate, option in zip(ema.gumbel_gates, ema.options):
                         selected = gate.max(1)[1].item()
                         mask = option[selected]
                         selected_layers = (mask.nonzero()+layer_offset).squeeze().tolist()
@@ -476,12 +476,12 @@ if __name__ == "__main__":
     parser.add_argument("--resume", type=str, default=None)
     parser.add_argument("--load-weight", type=str, default=None)
     parser.add_argument("--prefix", type=str, default='')
-    parser.add_argument("--ema-decay", type=float, default=0.9999)
+    parser.add_argument("--ema-decay", type=float, default=0.999)
     parser.add_argument("--lora-rank", type=int, default=8)
     parser.add_argument("--lora", action='store_true', default=False)
     parser.add_argument("--delta-w", action='store_true', default=False, help="enable efficient weight update during structure learning")
-    parser.add_argument('--scaling-range', nargs='+', type=float, default=[1e1, 1e1])
-    parser.add_argument('--tau-range', nargs='+', type=float, default=[4, 0.05])
+    parser.add_argument('--scaling-range', nargs='+', type=float, default=[1e2, 5e2])
+    parser.add_argument('--tau-range', nargs='+', type=float, default=[4, 0.1])
     parse_transport_args(parser)
     args = parser.parse_args()
     main(args)

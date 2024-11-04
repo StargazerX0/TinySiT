@@ -180,9 +180,9 @@ def main(args):
                 wandb_id = wandb.util.generate_id()
                 with open(wandb_resume, 'w') as f:
                     f.write(wandb_id)
-            wandb.init(project="RescaleSiT", name=args.prefix, id=wandb_id, resume="allow", config=args)
+            wandb.init(project="SiT", name=args.prefix, id=wandb_id, resume="allow", config=args)
         else:
-            wandb.init(project="RescaleSiT", name=args.prefix, config=args)
+            wandb.init(project="SiT", name=args.prefix, config=args)
 
     # Create model:
     assert args.image_size % 8 == 0, "Image size must be divisible by 8 (for the VAE encoder)."
@@ -204,8 +204,8 @@ def main(args):
         module.feature = output
     
     if args.model == 'SiT-S14/2':
-        student_layers = list(range(1, 14, 2))
-        teacher_layers = list(range(3, 28, 4))
+        student_layers = list(range(0, 14))
+        teacher_layers = list(range(1, 28, 2))
     elif args.model == 'SiT-S19/2':
         student_layers = [2, 5, 7, 10, 12, 15, 18]
         teacher_layers = [3, 7, 11, 15, 19, 23, 27]
@@ -271,14 +271,14 @@ def main(args):
     dataset = CustomDataset(features_dir, labels_dir, flip=0.5)
     sampler = DistributedSampler(
         dataset,
-        num_replicas=1,
+        num_replicas=dist.get_world_size(),
         rank=rank,
         shuffle=True,
         seed=args.global_seed
     )
     loader = DataLoader(
         dataset,
-        batch_size=args.batch_size,
+        batch_size=int(args.global_batch_size // dist.get_world_size()),
         shuffle=False,
         sampler=sampler,
         num_workers=args.num_workers,
@@ -323,7 +323,7 @@ def main(args):
 
     logger.info(f"Training for {args.epochs} epochs ({args.epochs * len(loader)} steps)...")
     scaler = torch.cuda.amp.GradScaler()
-    init_beta_feature = 1e-2
+    init_beta_feature = 2.0
     for epoch in range(start_epoch, args.epochs):
         sampler.set_epoch(epoch)
         logger.info(f"Beginning epoch {epoch}...")

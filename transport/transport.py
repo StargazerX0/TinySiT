@@ -8,6 +8,8 @@ from . import path
 from .utils import EasyDict, log_state, mean_flat
 from .integrators import ode, sde
 
+import torch.nn.functional as F
+
 class ModelType(enum.Enum):
     """
     Which type of output the model predicts.
@@ -159,7 +161,7 @@ class Transport:
                 
         return terms
 
-    def training_losses_kd_rep(self, model, teacher, x1, model_kwargs=None):
+    def training_losses_kd_rep(self, model, teacher, x1, model_kwargs=None,beta_feat=2.0):
         """Loss for training the score model
         Args:
         - model: backbone model; could be score, noise, or velocity
@@ -186,43 +188,45 @@ class Transport:
             # get feature losses
             feat_loss = 0
             cnt = 0
+            # for slayer in model.module.blocks:
+            #     if hasattr(slayer, "target_layer"):
+            #         target_layer = teacher.blocks[slayer.target_layer]
+            #         var_s, mean_s = th.var_mean(slayer.feature, dim=[1,2], keepdim=True)
+            #         var_t, mean_t = th.var_mean(target_layer.feature, dim=[1,2], keepdim=True)
+            #         mask_t = (target_layer.feature - mean_t).abs() < 4*var_t.sqrt()
+            #         mask_s = (slayer.feature - mean_s).abs() < 4*var_s.sqrt()
+            #         feat_loss += mean_flat( (mask_s * slayer.feature - mask_t * target_layer.feature.detach()) ** 2)
+            #         #feat_loss += mean_flat( (slayer.feature - target_layer.feature.detach()) ** 2)
+            #         cnt+=1
+            #     terms["feat_loss"] = feat_loss / cnt
+
             for slayer in model.module.blocks:
                 if hasattr(slayer, "target_layer"):
                     target_layer = teacher.blocks[slayer.target_layer]
-                    var_s, mean_s = th.var_mean(slayer.feature, dim=[1,2], keepdim=True)
-                    var_t, mean_t = th.var_mean(target_layer.feature, dim=[1,2], keepdim=True)
-                    mask_t = (target_layer.feature - mean_t).abs() < 2*var_t.sqrt()
-                    mask_s = (slayer.feature - mean_s).abs() < 2*var_s.sqrt()
-                    feat_loss += mean_flat( (mask_s * slayer.feature - mask_t * target_layer.feature.detach()) ** 2)
-                    #feat_loss += mean_flat( (slayer.feature - target_layer.feature.detach()) ** 2)
-                    cnt+=1
-            terms["feat_loss"] = feat_loss / cnt
+                    
+                    teacher_features = target_layer.feature.detach()
+                    student_features = slayer.feature
+                    
+                    student_flat = student_features.view(student_features.size(0), student_features.size(1), -1)
+                    teacher_flat = teacher_features.view(teacher_features.size(0), teacher_features.size(1), -1)
+                    
+                    cos_sim = F.cosine_similarity(student_flat, teacher_flat, dim=2)
 
+                    feat_loss += (1 - cos_sim).mean()
+                    
+                    cnt += 1
+
+            terms["feat_loss"] = feat_loss / cnt
+                
             # get kd loss
             kd_loss = mean_flat((model_output - teacher_output) ** 2)
             alpha = 0.9
             
             terms["kd_loss"] = kd_loss
-            terms["loss"] = alpha*terms["kd_loss"] + (1-alpha)*terms["gt"] + 1e-2 * terms["feat_loss"] 
+            terms["loss"] = alpha*terms["kd_loss"] + (1-alpha)*terms["gt"] + beta_feat * terms["feat_loss"] 
             
         else:
             raise NotImplementedError()
-            # _, drift_var = self.path_sampler.compute_drift(xt, t)
-            # sigma_t, _ = self.path_sampler.compute_sigma_t(path.expand_t_like_x(t, xt))
-            # if self.loss_type in [WeightType.VELOCITY]:
-            #     weight = (drift_var / sigma_t) ** 2
-            # elif self.loss_type in [WeightType.LIKELIHOOD]:
-            #     weight = drift_var / (sigma_t ** 2)
-            # elif self.loss_type in [WeightType.NONE]:
-            #     weight = 1
-            # else:
-            #     raise NotImplementedError()
-            
-            # if self.model_type == ModelType.NOISE:
-            #     terms['gt'] = mean_flat(weight * ((model_output - x0) ** 2))
-            # else:
-            #     terms['gt'] = mean_flat(weight * ((model_output * sigma_t + x0) ** 2))
-        
         return terms
     
 
